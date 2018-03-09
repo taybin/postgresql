@@ -20,6 +20,9 @@ postgresql_service_user: "{{ postgresql_admin_user }}"
 postgresql_service_group: "{{ postgresql_admin_user }}"
 postgresql_service_enabled: true
 
+# If a parmeter change requires a restart, then issue the restart?  Default to safety.
+postgresql_restart_on_config_change: false
+
 postgresql_cluster_name: "main"
 postgresql_cluster_reset: false
 
