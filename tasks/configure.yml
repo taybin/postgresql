@@ -47,6 +47,7 @@
   become: yes
   become_user: "{{ postgresql_service_user }}"
   when: ansible_os_family == "Debian" and postgresql_cluster_reset and pgdata_dir_exist.changed
+  register: postgresql_cluster_startup_conf
 
 - name: PostgreSQL | Check whether the postgres data directory is initialized
   stat:
@@ -142,7 +143,7 @@
     src: etc_systemd_system_postgresql.service.d_custom.conf.j2
     dest: "/etc/systemd/system/postgresql-{{ postgresql_version }}.service.d/custom.conf"
   when: ansible_os_family == "RedHat"
-  register: postgresql_systemd_custom_conf
+  register: postgresql_cluster_startup_conf
 
 - name: PostgreSQL | Ensure the pid directory for PostgreSQL exists
   file:
@@ -158,8 +159,51 @@
     enabled: yes
   when: postgresql_service_enabled
 
-- name: PostgreSQL | Restart PostgreSQL
+- name: PostgreSQL | Ensure PostgreSQL is running
+  service:
+    name: "{{ postgresql_service_name }}"
+    state: started
+
+- name: PostgreSQL | Reload PostgreSQL to implement parameter changes | v9.5 and later
+  service:
+    name: "{{ postgresql_service_name }}"
+    state: reloaded
+  when: (
+          (postgresql_configuration_pt1.changed or
+           postgresql_configuration_pt2.changed or
+           postgresql_configuration_pt3.changed) and
+          postgresql_version | version_compare('9.5','>=')
+        )
+
+- name: PostgreSQL | Check for parameter changes that require a restart | v9.5 and later
+  become: yes
+  become_user: "{{ postgresql_service_user }}"
+  shell: "{{ postgresql_bin_directory}}/psql postgres --username {{postgresql_admin_user}} --tuples-only --command='SELECT count(*) COUNT FROM pg_settings WHERE pending_restart IS true;'"
+  register: postgresql_param_change_restart_required
+  when: postgresql_version | version_compare('9.5','>=')
+  changed_when: postgresql_param_change_restart_required.rc == 0 and
+                postgresql_param_change_restart_required.stdout | replace (' ','') != "0"
+
+- name: PostgreSQL | Force a checkpoint before a restart
+  become: yes
+  become_user: "{{ postgresql_service_user }}"
+  shell: "{{ postgresql_bin_directory}}/psql postgres --username {{postgresql_admin_user}} --tuples-only --command='CHECKPOINT;'"
+  register: postgresql_checkpoint_before_restart
+  when: postgresql_cluster_startup_conf.changed or
+        ( postgresql_param_change_restart_required.changed and
+          postgresql_restart_on_config_change
+        ) or
+        (
+          (postgresql_configuration_pt1.changed or
+           postgresql_configuration_pt2.changed or
+           postgresql_configuration_pt3.changed) and
+          postgresql_version | version_compare('9.5','<')
+        )
+  changed_when: postgresql_checkpoint_before_restart.rc == 0 and
+                postgresql_checkpoint_before_restart.stdout | replace (' ','') == "CHECKPOINT"
+
+- name: PostgreSQL | Restart PostgreSQL to implement parameter changes
   service:
     name: "{{ postgresql_service_name }}"
     state: restarted
-  when: postgresql_configuration_pt1.changed or postgresql_configuration_pt2.changed or postgresql_configuration_pt3.changed or postgresql_systemd_custom_conf.changed
+  when: postgresql_checkpoint_before_restart.changed
